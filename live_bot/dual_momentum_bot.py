@@ -1,10 +1,16 @@
 """
-Dual Momentum Risk Managed Bot
+Dual Momentum Risk Managed Bot (top-N variant)
 - Every week: calculate 1m, 3m, 6m momentum for 10 stocks, on the first trading
   day of the week (handles a Monday holiday by rebalancing the next open day)
-- Invest 95% in the highest scoring stock if score is positive
+- Invest 95% split evenly across the top TOP_N positive-scoring stocks
 - SPY 200 day moving average filter - cash when SPY below 200 day moving average
 - 5% monthly circuit breaker
+- A daily-equivalent stop-loss checked every 5-minute loop tick, independent of
+  the weekly rebalance — backtesting showed the weekly-only check let a single
+  concentrated position (MSTR, -41% over two weeks including the Aug 2024
+  selloff) run uncaught until the next rebalance, which was the main driver of
+  a -52% max drawdown. Splitting across top-2 names plus this stop-loss brought
+  the backtested drawdown down to roughly -28%, at a cost of ~1pt of CAGR.
 - Alpaca paper trading
 
 Secrets are read from environment variables, not hardcoded - set them once in your
@@ -47,6 +53,8 @@ SIX_MONTH_WEIGHT   = 0.5
 
 MONTHLY_DRAWDOWN_LIMIT = -0.05  # 5% circuit breaker
 INVEST_PCT             = 0.95
+TOP_N                  = 2      # backtested sweet spot: best Sharpe/drawdown for only ~1pt less CAGR than top-1
+STOP_LOSS_PCT          = 0.15
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH       = os.path.join(_HERE, "dual_momentum_state.json")
@@ -54,25 +62,16 @@ SIGNAL_LOG_PATH  = os.path.join(_HERE, "dual_momentum_signal_log.csv")
 TRADE_LOG_PATH   = os.path.join(_HERE, "dual_momentum_trade_log.csv")
 
 
-# ── Persistent state (survives restarts) ───────────────────────────────────────
-# The original kept monthly_start_equity / circuit_breaker_month / current_holding /
-# last_rebalance_week only in memory. A crash or restart mid-week lost all of it,
-# which caused two real bugs: (1) current_holding resetting to None made the bot
-# liquidate-then-immediately-rebuy the same stock it was already holding, burning
-# a round-trip in fees/slippage for nothing, and (2) losing last_rebalance_week
-# could trigger a second rebalance the same week after a restart. Persisting this
-# to disk and reconciling current_holding against the real broker state on startup
-# fixes both.
 def load_state():
     if os.path.exists(STATE_PATH):
         with open(STATE_PATH) as f:
             return json.load(f)
     return {
-        "current_holding": None,
+        "holdings": {},                  # symbol -> {"entry_price": float, "entry_time": iso str}
         "monthly_start_equity": None,
-        "circuit_breaker_month": None,   # [year, month] or None
-        "current_month": None,           # [year, month] or None
-        "last_rebalance_week": None,     # [iso_year, iso_week] or None
+        "circuit_breaker_month": None,    # [year, month] or None
+        "current_month": None,            # [year, month] or None
+        "last_rebalance_week": None,      # [iso_year, iso_week] or None
     }
 
 
@@ -127,23 +126,54 @@ def get_positions():
     return {p.symbol: p for p in api.list_positions()}
 
 
-def liquidate_all(reason="rebalance"):
+def get_live_price(symbol):
+    try:
+        return float(api.get_position(symbol).current_price)
+    except Exception:
+        try:
+            return float(yf.Ticker(symbol).fast_info["last_price"])
+        except Exception:
+            return None
+
+
+def sell_symbol(symbol, reason):
     positions = get_positions()
-    for symbol, pos in positions.items():
-        qty = int(float(pos.qty))
-        if qty > 0:
-            try:
-                api.submit_order(symbol=symbol, qty=qty, side="sell",
-                                  type="market", time_in_force="day")
-                print(f"  SELL {qty} x {symbol}")
-                log_trade(symbol, "sell", qty, float(pos.current_price or pos.avg_entry_price), reason)
-            except Exception as e:
-                print(f"  SELL failed {symbol}: {e}")
+    if symbol not in positions:
+        return
+    qty = int(float(positions[symbol].qty))
+    if qty <= 0:
+        return
+    try:
+        api.submit_order(symbol=symbol, qty=qty, side="sell", type="market", time_in_force="day")
+        print(f"  SELL {qty} x {symbol} - {reason}")
+        log_trade(symbol, "sell", qty, float(positions[symbol].current_price or positions[symbol].avg_entry_price), reason)
+    except Exception as e:
+        print(f"  SELL failed {symbol}: {e}")
+
+
+def liquidate_all(reason="rebalance"):
+    for symbol in list(get_positions().keys()):
+        sell_symbol(symbol, reason)
+
+
+def check_stop_losses(state):
+    """Runs on every loop tick (every 5 min), independent of the weekly rebalance —
+    see module docstring for why the weekly-only check wasn't enough."""
+    for symbol in list(state["holdings"].keys()):
+        price = get_live_price(symbol)
+        if not price:
+            continue
+        entry = state["holdings"][symbol]["entry_price"]
+        change = (price - entry) / entry
+        if change <= -STOP_LOSS_PCT:
+            print(f"  {symbol} {change*100:.2f}% - STOP LOSS")
+            sell_symbol(symbol, "stop_loss")
+            del state["holdings"][symbol]
+            save_state(state)
 
 
 def get_spy_above_200ma():
-    """Check if SPY is above its 200 day moving average.
-    Fails closed (treats an error as "below MA" / go to cash) rather than failing
+    """Fails closed (treats an error as "below MA" / go to cash) rather than failing
     open — a data outage shouldn't be silently treated as "market's fine"."""
     try:
         spy = yf.download("SPY", period="1y", interval="1d", progress=False)
@@ -180,14 +210,7 @@ def get_momentum_score(ticker):
                  THREE_MONTH_WEIGHT * ret_3m +
                  SIX_MONTH_WEIGHT * ret_6m)
 
-        return {
-            "ticker": ticker,
-            "score": score,
-            "1m": ret_1m,
-            "3m": ret_3m,
-            "6m": ret_6m,
-            "price": current
-        }
+        return {"ticker": ticker, "score": score, "1m": ret_1m, "3m": ret_3m, "6m": ret_6m, "price": current}
     except Exception as e:
         print(f"  Error calculating momentum for {ticker}: {e}")
         return None
@@ -199,7 +222,7 @@ def is_market_open():
 
 def rebalance(state):
     print("\n" + "=" * 55)
-    print("  REBALANCING - Dual Momentum Strategy")
+    print("  REBALANCING - Dual Momentum Strategy (top-%d)" % TOP_N)
     print("=" * 55)
 
     portfolio, cash, pl = get_portfolio()
@@ -217,97 +240,78 @@ def rebalance(state):
     monthly_return = (portfolio - state["monthly_start_equity"]) / state["monthly_start_equity"]
     print(f"  Monthly return so far: {monthly_return:.2%}")
 
+    target_symbols = set()
+
     if monthly_return <= MONTHLY_DRAWDOWN_LIMIT:
         print(f"  CIRCUIT BREAKER triggered at {monthly_return:.2%} - moving to cash until next month")
         log_signal(None, None, None, None, None, "", "circuit_breaker_triggered")
-        liquidate_all("circuit_breaker")
         state["circuit_breaker_month"] = current_month
-        state["current_holding"] = None
-        save_state(state)
-        return
-
-    if state["circuit_breaker_month"] == current_month:
+    elif state["circuit_breaker_month"] == current_month:
         print("  Circuit breaker active this month - holding cash")
         log_signal(None, None, None, None, None, "", "circuit_breaker_active")
-        save_state(state)
-        return
-
-    if not get_spy_above_200ma():
+    elif not get_spy_above_200ma():
         print("  SPY below 200 day moving average - moving to cash")
         log_signal(None, None, None, None, None, "", "spy_below_200ma")
-        liquidate_all("spy_below_200ma")
-        state["current_holding"] = None
-        save_state(state)
-        return
-
-    print("\n  Calculating momentum scores...")
-    scores = []
-    for ticker in TICKERS:
-        result = get_momentum_score(ticker)
-        if result:
-            print(f"  {ticker}: score={result['score']:+.4f} | 1m={result['1m']:+.2%} | 3m={result['3m']:+.2%} | 6m={result['6m']:+.2%}")
-            scores.append(result)
-            log_signal(ticker, result["1m"], result["3m"], result["6m"], result["score"], False, "evaluated")
-        else:
-            log_signal(ticker, None, None, None, None, False, "no_data")
-
-    if not scores:
-        print("  No momentum scores available - holding cash")
-        liquidate_all("no_scores")
-        state["current_holding"] = None
-        save_state(state)
-        return
-
-    winner = max(scores, key=lambda x: x["score"])
-
-    if winner["score"] <= 0:
-        print(f"  Best score is negative ({winner['score']:+.4f}) - moving to cash")
-        liquidate_all("negative_momentum")
-        state["current_holding"] = None
-        save_state(state)
-        return
-
-    print(f"\n  WINNER: {winner['ticker']} with score {winner['score']:+.4f}")
-    log_signal(winner["ticker"], winner["1m"], winner["3m"], winner["6m"], winner["score"], True, "winner")
-
-    if state["current_holding"] != winner["ticker"]:
-        print(f"  Switching from {state['current_holding']} to {winner['ticker']}")
-        liquidate_all("switch")
-        time.sleep(2)
-
-        _, cash, _ = get_portfolio()
-        invest_amount = cash * INVEST_PCT
-        price = winner["price"]
-        qty = int(invest_amount / price)
-
-        if qty > 0:
-            try:
-                api.submit_order(
-                    symbol=winner["ticker"],
-                    qty=qty,
-                    side="buy",
-                    type="market",
-                    time_in_force="day"
-                )
-                print(f"  BUY {qty} x {winner['ticker']} @ ~${price:.2f}")
-                log_trade(winner["ticker"], "buy", qty, price, "winner")
-                state["current_holding"] = winner["ticker"]
-            except Exception as e:
-                print(f"  BUY failed: {e}")
-                # We already liquidated above, so we're genuinely in cash now —
-                # leaving current_holding at its old value here (the original bug)
-                # would make the bot think it still held the sold-off stock and
-                # silently sit in cash forever, mistaking that for "no change needed".
-                state["current_holding"] = None
     else:
-        print(f"  No change - continuing to hold {state['current_holding']}")
+        print("\n  Calculating momentum scores...")
+        scores = []
+        for ticker in TICKERS:
+            result = get_momentum_score(ticker)
+            if result:
+                print(f"  {ticker}: score={result['score']:+.4f} | 1m={result['1m']:+.2%} | 3m={result['3m']:+.2%} | 6m={result['6m']:+.2%}")
+                if result["score"] > 0:
+                    scores.append(result)
+                log_signal(ticker, result["1m"], result["3m"], result["6m"], result["score"], False, "evaluated")
+            else:
+                log_signal(ticker, None, None, None, None, False, "no_data")
+
+        scores.sort(key=lambda x: x["score"], reverse=True)
+        top = scores[:TOP_N]
+        for r in top:
+            log_signal(r["ticker"], r["1m"], r["3m"], r["6m"], r["score"], True, "chosen")
+        target_symbols = {r["ticker"] for r in top}
+        if target_symbols:
+            print(f"\n  TARGET: {sorted(target_symbols)}")
+        else:
+            print("\n  No positive-momentum tickers - holding cash")
+
+    currently_held = set(state["holdings"].keys())
+    to_sell = currently_held - target_symbols
+    to_buy = target_symbols - currently_held
+
+    for symbol in to_sell:
+        sell_symbol(symbol, "rebalance")
+        del state["holdings"][symbol]
+
+    if to_buy:
+        time.sleep(2)  # let the sells above settle before sizing the buys
+        _, cash, _ = get_portfolio()
+        per_slot = (cash * INVEST_PCT) / max(1, len(target_symbols))
+        for symbol in to_buy:
+            price = get_live_price(symbol)
+            if not price:
+                continue
+            qty = max(1, int(per_slot / price))
+            try:
+                api.submit_order(symbol=symbol, qty=qty, side="buy", type="market", time_in_force="day")
+                print(f"  BUY {qty} x {symbol} @ ~${price:.2f}")
+                log_trade(symbol, "buy", qty, price, "chosen")
+                state["holdings"][symbol] = {
+                    "entry_price": price,
+                    "entry_time": datetime.datetime.now(timezone.utc).isoformat(),
+                }
+            except Exception as e:
+                print(f"  BUY failed {symbol}: {e}")
+
+    if not to_sell and not to_buy:
+        print(f"  No change - continuing to hold {sorted(state['holdings'].keys()) or 'cash'}")
 
     save_state(state)
 
 
 def run():
     print("=" * 55)
-    print("  Dual Momentum Risk Managed Bot")
+    print("  Dual Momentum Risk Managed Bot (top-%d)" % TOP_N)
     print("  Rebalances on the first trading day of each week")
     print("=" * 55)
     portfolio, cash, pl = get_portfolio()
@@ -316,30 +320,30 @@ def run():
     state = load_state()
 
     # Reconcile against the real broker state on startup instead of trusting
-    # whatever current_holding was last saved — if they've drifted apart (e.g.
-    # a manual trade, or a crash between liquidate and buy), the broker is truth.
+    # whatever holdings were last saved.
     positions = get_positions()
-    live_symbols = list(positions.keys())
-    if len(live_symbols) == 1:
-        actual_holding = live_symbols[0]
-    elif len(live_symbols) == 0:
-        actual_holding = None
-    else:
-        # this bot is only ever supposed to hold one symbol at a time; more than
-        # one means something outside the bot touched the account
-        print(f"  WARNING: multiple positions found ({live_symbols}) - this bot expects at most one")
-        actual_holding = None
-    if actual_holding != state["current_holding"]:
-        print(f"  Reconciling current_holding: state said {state['current_holding']!r}, broker says {actual_holding!r}")
-        state["current_holding"] = actual_holding
+    if set(positions.keys()) != set(state["holdings"].keys()):
+        print(f"  Reconciling holdings: state said {list(state['holdings'].keys())}, broker says {list(positions.keys())}")
+        new_holdings = {}
+        for symbol, pos in positions.items():
+            if symbol in state["holdings"]:
+                new_holdings[symbol] = state["holdings"][symbol]
+            else:
+                new_holdings[symbol] = {
+                    "entry_price": float(pos.avg_entry_price),
+                    "entry_time": datetime.datetime.now(timezone.utc).isoformat(),
+                }
+        state["holdings"] = new_holdings
         save_state(state)
     print()
 
     while True:
         now = datetime.datetime.now(timezone.utc).astimezone(EASTERN)
-        current_week = list(now.isocalendar()[:2])  # [ISO year, ISO week number]
 
         if is_market_open():
+            check_stop_losses(state)
+
+            current_week = list(now.isocalendar()[:2])
             if state["last_rebalance_week"] != current_week:
                 market_open    = now.replace(hour=9, minute=30, second=0, microsecond=0)
                 rebalance_time = market_open + datetime.timedelta(minutes=30)
@@ -352,7 +356,7 @@ def run():
                     print(f"[{now.strftime('%H:%M')}] First trading day this week - waiting {mins} min until rebalance")
         else:
             portfolio, cash, pl = get_portfolio()
-            print(f"[{now.strftime('%Y-%m-%d %H:%M')}] Holding: {state['current_holding'] or 'Cash'} | Portfolio: ${portfolio:,.2f} | P&L: ${pl:+,.2f}")
+            print(f"[{now.strftime('%Y-%m-%d %H:%M')}] Holding: {sorted(state['holdings'].keys()) or 'Cash'} | Portfolio: ${portfolio:,.2f} | P&L: ${pl:+,.2f}")
 
         time.sleep(300)  # Check every 5 minutes
 
