@@ -15,10 +15,18 @@ Examples:
 import argparse
 import os
 
+import pandas as pd
+
 from .config import StrategyConfig
 from .engine import run_backtest
 from .metrics import compute_metrics
 from .signals import load_signal
+
+# engine.py needs `lookback_bars` (90) trading days of history before it can evaluate
+# anything, so fetch this much extra calendar time before --start and trim the warmup
+# back off afterward — otherwise a --start/--end window under ~5 months has nowhere
+# for that lookback to come from and run_backtest raises "not enough overlapping history".
+WARMUP_CALENDAR_DAYS = 170
 
 
 def main():
@@ -35,15 +43,17 @@ def main():
     args = parser.parse_args()
 
     config = StrategyConfig()
+    requested_start = pd.Timestamp(args.start)
+    fetch_start = (requested_start - pd.Timedelta(days=WARMUP_CALENDAR_DAYS)).date().isoformat()
 
     if args.synthetic:
         from . import synthetic
-        universe = synthetic.make_universe(config.watchlist, args.start, args.end)
-        spy = synthetic.make_symbol("SPY", args.start, args.end, seed=1)
+        universe = synthetic.make_universe(config.watchlist, fetch_start, args.end)
+        spy = synthetic.make_symbol("SPY", fetch_start, args.end, seed=1)
     else:
         from . import data
-        universe = data.fetch_universe(config.watchlist, args.start, args.end, args.interval)
-        spy = data.fetch_symbol("SPY", args.start, args.end, args.interval)
+        universe = data.fetch_universe(config.watchlist, fetch_start, args.end, args.interval)
+        spy = data.fetch_symbol("SPY", fetch_start, args.end, args.interval)
 
     if args.interval == "60m":
         config.time_stop_bars = 2  # ~120 minutes
@@ -52,6 +62,11 @@ def main():
 
     signal = load_signal(args.use_chronos)
     result = run_backtest(universe, spy, config, signal)
+
+    # drop the warmup-only portion so reported metrics reflect the requested window
+    result.equity_curve = result.equity_curve[result.equity_curve.index >= requested_start]
+    result.trades = [t for t in result.trades if t.entry_date >= requested_start]
+
     metrics = compute_metrics(result, bars_per_year=252 if args.interval == "1d" else 252 * 7)
 
     print(metrics.summary())
