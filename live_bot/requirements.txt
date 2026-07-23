@@ -1,0 +1,8 @@
+torch
+chronos-forecasting
+numpy
+pandas
+yfinance
+finnhub-python
+alpaca-trade-api
+pytz
