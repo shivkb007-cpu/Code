@@ -5,6 +5,7 @@ shell (see live_bot/README.md) before running this. If any are missing the scrip
 fails immediately with a clear message instead of running with a blank/broken client.
 """
 
+import csv
 import os
 import time
 import datetime
@@ -46,6 +47,41 @@ NO_ENTRY_BEFORE_MINS = 15
 CONFIDENCE_1D        = 0.65
 CONFIDENCE_3D        = 0.60
 SLIPPAGE_BPS         = 15  # max slippage tolerated on limit orders, in basis points
+
+SIGNAL_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kronos_signal_log.csv")
+TRADE_LOG_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kronos_trade_log.csv")
+
+
+def _append_csv(path, row: dict):
+    file_exists = os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def log_signal(symbol, day_change, conf_1d, conf_3d, cleared, reason):
+    _append_csv(SIGNAL_LOG_PATH, {
+        "time": datetime.datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "day_change": "" if day_change is None else f"{day_change:.4f}",
+        "conf_1d": "" if conf_1d is None else f"{conf_1d:.4f}",
+        "conf_3d": "" if conf_3d is None else f"{conf_3d:.4f}",
+        "cleared_threshold": cleared,
+        "reason": reason,
+    })
+
+
+def log_trade(symbol, side, qty, price, reason):
+    _append_csv(TRADE_LOG_PATH, {
+        "time": datetime.datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "side": side,
+        "qty": qty,
+        "price": f"{price:.4f}",
+        "reason": reason,
+    })
 
 print("Loading Kronos model...")
 try:
@@ -174,6 +210,7 @@ def buy(symbol, price, portfolio, cash):
         api.submit_order(symbol=symbol, qty=qty, side="buy", type="limit",
                           limit_price=limit_price, time_in_force="day")
         print(f"  BUY {qty} x {symbol} @ limit ${limit_price:.2f}")
+        log_trade(symbol, "buy", qty, limit_price, "entry")
         return qty
     except Exception as e:
         print(f"  BUY failed {symbol}: {e}")
@@ -186,6 +223,7 @@ def sell(symbol, qty, price, reason=""):
         api.submit_order(symbol=symbol, qty=qty, side="sell", type="limit",
                           limit_price=limit_price, time_in_force="day")
         print(f"  SELL {qty} x {symbol} @ limit ${limit_price:.2f} - {reason}")
+        log_trade(symbol, "sell", qty, limit_price, reason)
     except Exception as e:
         print(f"  SELL failed {symbol}: {e}")
 
@@ -279,18 +317,24 @@ def run():
         signals = []
         for symbol in WATCHLIST:
             if symbol in held or symbol in positions:
+                log_signal(symbol, None, None, None, False, "already_held")
                 continue
             if has_severe_news(symbol):
+                log_signal(symbol, None, None, None, False, "severe_news")
                 continue
             day_change = get_day_change(symbol)
             if day_change <= 0:
+                log_signal(symbol, day_change, None, None, False, "day_change<=0")
                 continue
             result = get_kronos_confidence(symbol)
             if result is None:
+                log_signal(symbol, day_change, None, None, False, "no_forecast")
                 continue
             conf_1d, conf_3d = result
+            cleared = conf_1d >= CONFIDENCE_1D and conf_3d >= CONFIDENCE_3D
             print(f"  {symbol}: day={day_change:+.2%} | 1d={conf_1d:.0%} | 3d={conf_3d:.0%}")
-            if conf_1d >= CONFIDENCE_1D and conf_3d >= CONFIDENCE_3D:
+            log_signal(symbol, day_change, conf_1d, conf_3d, cleared, "evaluated")
+            if cleared:
                 signals.append((symbol, day_change, conf_1d + conf_3d))
         if signals:
             signals.sort(key=lambda x: x[2], reverse=True)
