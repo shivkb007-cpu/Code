@@ -27,6 +27,13 @@ MONTHLY_DRAWDOWN_LIMIT = -0.05
 INVEST_PCT             = 0.95
 SLIPPAGE_BPS           = 10
 
+# The weekly rebalance only checks risk once a week, using the prior close, on a
+# position that's 95% concentrated in one stock — a violent single-name move (e.g.
+# MSTR's -41% over two weeks including the Aug 5 2024 selloff) isn't caught until
+# the following Monday. This stop-loss checks every day instead, independent of
+# the rebalance cadence, so a crash gets cut mid-week rather than ridden out.
+STOP_LOSS_PCT          = 0.15
+
 MIN_LOOKBACK_BARS = 200  # 200-day SPY MA is the binding constraint
 
 # 200 trading days plus the 6-month momentum window need real calendar room before
@@ -75,6 +82,16 @@ def run_backtest(price_data: dict, spy_data: pd.DataFrame, start_cash: float = 1
             equity_curve.append(cash)
             equity_dates.append(date)
             continue
+
+        if held is not None:
+            day_low = float(bars[held["symbol"]]["Low"].iloc[i])
+            stop_price = held["entry_price"] * (1 - STOP_LOSS_PCT)
+            if day_low <= stop_price:
+                exit_price = stop_price * (1 - slip)
+                cash += held["qty"] * exit_price
+                trades.append(Trade(held["symbol"], common_index[held["entry_bar"]], held["entry_price"],
+                                     date, exit_price, held["qty"], "stop_loss"))
+                held = None
 
         prior_close_equity = cash + (held["qty"] * float(bars[held["symbol"]]["Close"].iloc[i - 1]) if held else 0.0)
 
