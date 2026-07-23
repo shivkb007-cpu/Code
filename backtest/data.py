@@ -23,8 +23,11 @@ def fetch_symbol(symbol: str, start: str, end: str, interval: str = "1d",
     """Download (or load cached) OHLCV for one symbol. Requires network access to Yahoo Finance."""
     cache_file = _cache_path(symbol, interval)
     if use_cache and os.path.exists(cache_file):
-        df = pd.read_parquet(cache_file)
-        return df.loc[(df.index >= start) & (df.index <= end)]
+        cached = pd.read_parquet(cache_file)
+        # only trust the cache if it actually spans the requested range — otherwise
+        # a narrower prior run's cache silently starves a wider later request
+        if not cached.empty and cached.index.min() <= pd.Timestamp(start) and cached.index.max() >= pd.Timestamp(end):
+            return cached.loc[(cached.index >= start) & (cached.index <= end)]
 
     import yfinance as yf
     df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
