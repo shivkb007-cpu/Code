@@ -338,25 +338,32 @@ def run():
     print()
 
     while True:
-        now = datetime.datetime.now(timezone.utc).astimezone(EASTERN)
+        try:
+            now = datetime.datetime.now(timezone.utc).astimezone(EASTERN)
 
-        if is_market_open():
-            check_stop_losses(state)
+            if is_market_open():
+                check_stop_losses(state)
 
-            current_week = list(now.isocalendar()[:2])
-            if state["last_rebalance_week"] != current_week:
-                market_open    = now.replace(hour=9, minute=30, second=0, microsecond=0)
-                rebalance_time = market_open + datetime.timedelta(minutes=30)
-                if now >= rebalance_time:
-                    rebalance(state)
-                    state["last_rebalance_week"] = current_week
-                    save_state(state)
-                else:
-                    mins = int((rebalance_time - now).total_seconds() / 60)
-                    print(f"[{now.strftime('%H:%M')}] First trading day this week - waiting {mins} min until rebalance")
-        else:
-            portfolio, cash, pl = get_portfolio()
-            print(f"[{now.strftime('%Y-%m-%d %H:%M')}] Holding: {sorted(state['holdings'].keys()) or 'Cash'} | Portfolio: ${portfolio:,.2f} | P&L: ${pl:+,.2f}")
+                current_week = list(now.isocalendar()[:2])
+                if state["last_rebalance_week"] != current_week:
+                    market_open    = now.replace(hour=9, minute=30, second=0, microsecond=0)
+                    rebalance_time = market_open + datetime.timedelta(minutes=30)
+                    if now >= rebalance_time:
+                        rebalance(state)
+                        state["last_rebalance_week"] = current_week
+                        save_state(state)
+                    else:
+                        mins = int((rebalance_time - now).total_seconds() / 60)
+                        print(f"[{now.strftime('%H:%M')}] First trading day this week - waiting {mins} min until rebalance")
+            else:
+                portfolio, cash, pl = get_portfolio()
+                print(f"[{now.strftime('%Y-%m-%d %H:%M')}] Holding: {sorted(state['holdings'].keys()) or 'Cash'} | Portfolio: ${portfolio:,.2f} | P&L: ${pl:+,.2f}")
+        except Exception as e:
+            # A dropped connection to Alpaca or Yahoo Finance mid-request shouldn't
+            # kill a process meant to run unattended for weeks — log it and retry
+            # next cycle instead of crashing the whole bot.
+            now = datetime.datetime.now(timezone.utc).astimezone(EASTERN)
+            print(f"[{now.strftime('%H:%M')}] Unexpected error this cycle ({e}) - will retry next cycle")
 
         time.sleep(300)  # Check every 5 minutes
 

@@ -258,94 +258,100 @@ def run():
         print(f"  Reconciled existing position: {symbol} @ ${float(pos.avg_entry_price):.2f}")
 
     while True:
-        now = datetime.datetime.now(timezone.utc)
-        if not is_market_open():
-            print(f"[{now.strftime('%H:%M:%S')}] Market closed. Waiting 60s...")
+        try:
+            now = datetime.datetime.now(timezone.utc)
+            if not is_market_open():
+                print(f"[{now.strftime('%H:%M:%S')}] Market closed. Waiting 60s...")
+                time.sleep(60)
+                continue
+            since_open = mins_since_open()
+            to_close   = mins_to_close()
+            if to_close <= 30:
+                print("\n30 min to close - closing all")
+                close_all()
+                held = {}
+                time.sleep(60)
+                continue
+            portfolio, cash, pl = get_portfolio()
+            print(f"\n[{now.strftime('%H:%M:%S')}] Scanning... ({to_close} min to close | {since_open} min since open)")
+            print(f"  Portfolio: ${portfolio:,.2f} | Cash: ${cash:,.2f} | P&L: ${pl:+,.2f}")
+            if since_open < NO_ENTRY_BEFORE_MINS:
+                print(f"  Waiting {NO_ENTRY_BEFORE_MINS - since_open} min to settle")
+                time.sleep(60)
+                continue
+            positions = get_positions()
+            for s in list(held.keys()):
+                if s not in positions:
+                    del held[s]
+            for symbol in list(held.keys()):
+                if symbol not in positions:
+                    continue
+                price = get_live_price(symbol)
+                if not price:
+                    continue
+                entry     = held[symbol]["entry"]
+                mins_held = (now - held[symbol]["entry_time"]).total_seconds() / 60
+                change    = (price - entry) / entry
+                if change >= PROFIT_TARGET:
+                    print(f"  {symbol} +{change*100:.2f}% - PROFIT TARGET")
+                    sell(symbol, int(float(positions[symbol].qty)), price, "profit target")
+                    del held[symbol]
+                elif change <= -STOP_LOSS:
+                    print(f"  {symbol} {change*100:.2f}% - STOP LOSS")
+                    sell(symbol, int(float(positions[symbol].qty)), price, "stop loss")
+                    del held[symbol]
+                elif mins_held >= TIME_STOP_MINUTES and change <= 0:
+                    print(f"  {symbol} {change*100:.2f}% - TIME STOP")
+                    sell(symbol, int(float(positions[symbol].qty)), price, "time stop")
+                    del held[symbol]
+                else:
+                    print(f"  Holding {symbol} | {change*100:+.2f}% | {mins_held:.0f} min")
+            positions = get_positions()
+            if len(positions) >= MAX_POSITIONS:
+                print("  Max positions reached")
+                time.sleep(60)
+                continue
+            if not get_spy_positive():
+                print("  SPY negative - no new entries")
+                time.sleep(60)
+                continue
+            signals = []
+            for symbol in WATCHLIST:
+                if symbol in held or symbol in positions:
+                    log_signal(symbol, None, None, None, False, "already_held")
+                    continue
+                if has_severe_news(symbol):
+                    log_signal(symbol, None, None, None, False, "severe_news")
+                    continue
+                day_change = get_day_change(symbol)
+                if day_change <= 0:
+                    log_signal(symbol, day_change, None, None, False, "day_change<=0")
+                    continue
+                result = get_kronos_confidence(symbol)
+                if result is None:
+                    log_signal(symbol, day_change, None, None, False, "no_forecast")
+                    continue
+                conf_1d, conf_3d = result
+                cleared = conf_1d >= CONFIDENCE_1D and conf_3d >= CONFIDENCE_3D
+                print(f"  {symbol}: day={day_change:+.2%} | 1d={conf_1d:.0%} | 3d={conf_3d:.0%}")
+                log_signal(symbol, day_change, conf_1d, conf_3d, cleared, "evaluated")
+                if cleared:
+                    signals.append((symbol, day_change, conf_1d + conf_3d))
+            if signals:
+                signals.sort(key=lambda x: x[2], reverse=True)
+                best = signals[0]
+                price = get_live_price(best[0])
+                if price:
+                    print(f"\n  Best signal: {best[0]} - buying")
+                    qty = buy(best[0], price, portfolio, cash)
+                    if qty:
+                        held[best[0]] = {"entry": price, "entry_time": now}
             time.sleep(60)
-            continue
-        since_open = mins_since_open()
-        to_close   = mins_to_close()
-        if to_close <= 30:
-            print("\n30 min to close - closing all")
-            close_all()
-            held = {}
+        except Exception as e:
+            # A dropped connection to Alpaca/Yahoo/Finnhub mid-request shouldn't kill
+            # a process meant to run unattended for hours — log it and retry instead.
+            print(f"[{datetime.datetime.now(timezone.utc).strftime('%H:%M:%S')}] Unexpected error this cycle ({e}) - will retry next cycle")
             time.sleep(60)
-            continue
-        portfolio, cash, pl = get_portfolio()
-        print(f"\n[{now.strftime('%H:%M:%S')}] Scanning... ({to_close} min to close | {since_open} min since open)")
-        print(f"  Portfolio: ${portfolio:,.2f} | Cash: ${cash:,.2f} | P&L: ${pl:+,.2f}")
-        if since_open < NO_ENTRY_BEFORE_MINS:
-            print(f"  Waiting {NO_ENTRY_BEFORE_MINS - since_open} min to settle")
-            time.sleep(60)
-            continue
-        positions = get_positions()
-        for s in list(held.keys()):
-            if s not in positions:
-                del held[s]
-        for symbol in list(held.keys()):
-            if symbol not in positions:
-                continue
-            price = get_live_price(symbol)
-            if not price:
-                continue
-            entry     = held[symbol]["entry"]
-            mins_held = (now - held[symbol]["entry_time"]).total_seconds() / 60
-            change    = (price - entry) / entry
-            if change >= PROFIT_TARGET:
-                print(f"  {symbol} +{change*100:.2f}% - PROFIT TARGET")
-                sell(symbol, int(float(positions[symbol].qty)), price, "profit target")
-                del held[symbol]
-            elif change <= -STOP_LOSS:
-                print(f"  {symbol} {change*100:.2f}% - STOP LOSS")
-                sell(symbol, int(float(positions[symbol].qty)), price, "stop loss")
-                del held[symbol]
-            elif mins_held >= TIME_STOP_MINUTES and change <= 0:
-                print(f"  {symbol} {change*100:.2f}% - TIME STOP")
-                sell(symbol, int(float(positions[symbol].qty)), price, "time stop")
-                del held[symbol]
-            else:
-                print(f"  Holding {symbol} | {change*100:+.2f}% | {mins_held:.0f} min")
-        positions = get_positions()
-        if len(positions) >= MAX_POSITIONS:
-            print("  Max positions reached")
-            time.sleep(60)
-            continue
-        if not get_spy_positive():
-            print("  SPY negative - no new entries")
-            time.sleep(60)
-            continue
-        signals = []
-        for symbol in WATCHLIST:
-            if symbol in held or symbol in positions:
-                log_signal(symbol, None, None, None, False, "already_held")
-                continue
-            if has_severe_news(symbol):
-                log_signal(symbol, None, None, None, False, "severe_news")
-                continue
-            day_change = get_day_change(symbol)
-            if day_change <= 0:
-                log_signal(symbol, day_change, None, None, False, "day_change<=0")
-                continue
-            result = get_kronos_confidence(symbol)
-            if result is None:
-                log_signal(symbol, day_change, None, None, False, "no_forecast")
-                continue
-            conf_1d, conf_3d = result
-            cleared = conf_1d >= CONFIDENCE_1D and conf_3d >= CONFIDENCE_3D
-            print(f"  {symbol}: day={day_change:+.2%} | 1d={conf_1d:.0%} | 3d={conf_3d:.0%}")
-            log_signal(symbol, day_change, conf_1d, conf_3d, cleared, "evaluated")
-            if cleared:
-                signals.append((symbol, day_change, conf_1d + conf_3d))
-        if signals:
-            signals.sort(key=lambda x: x[2], reverse=True)
-            best = signals[0]
-            price = get_live_price(best[0])
-            if price:
-                print(f"\n  Best signal: {best[0]} - buying")
-                qty = buy(best[0], price, portfolio, cash)
-                if qty:
-                    held[best[0]] = {"entry": price, "entry_time": now}
-        time.sleep(60)
 
 
 if __name__ == "__main__":
