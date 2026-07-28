@@ -355,6 +355,12 @@ def run():
                     else:
                         mins = int((rebalance_time - now).total_seconds() / 60)
                         print(f"[{now.strftime('%H:%M')}] First trading day this week - waiting {mins} min until rebalance")
+                else:
+                    # Already rebalanced this week — print a heartbeat anyway, every
+                    # cycle, so the terminal going quiet for hours during market hours
+                    # (the previous behavior) can't be mistaken for the process hanging.
+                    portfolio, cash, pl = get_portfolio()
+                    print(f"[{now.strftime('%H:%M')}] Holding: {sorted(state['holdings'].keys()) or 'Cash'} | Portfolio: ${portfolio:,.2f} | P&L: ${pl:+,.2f}")
             else:
                 portfolio, cash, pl = get_portfolio()
                 print(f"[{now.strftime('%Y-%m-%d %H:%M')}] Holding: {sorted(state['holdings'].keys()) or 'Cash'} | Portfolio: ${portfolio:,.2f} | P&L: ${pl:+,.2f}")
