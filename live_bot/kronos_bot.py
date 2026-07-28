@@ -139,7 +139,7 @@ def get_live_price(symbol):
 
 def get_spy_positive():
     try:
-        spy = yf.download("SPY", period="2d", interval="1d", progress=False)
+        spy = yf.download("SPY", period="2d", interval="1d", progress=False, timeout=30)
         if spy.empty or len(spy) < 2:
             print("  SPY data unavailable - blocking new entries")
             return False
@@ -173,7 +173,7 @@ def get_kronos_confidence(symbol):
     if not KRONOS_AVAILABLE:
         return None
     try:
-        df = yf.download(symbol, period="90d", interval="1d", progress=False)
+        df = yf.download(symbol, period="90d", interval="1d", progress=False, timeout=30)
         if df.empty or len(df) < 30:
             return None
         if isinstance(df.columns, pd.MultiIndex):
@@ -192,7 +192,7 @@ def get_kronos_confidence(symbol):
 
 def get_day_change(symbol):
     try:
-        df = yf.download(symbol, period="2d", interval="1d", progress=False)
+        df = yf.download(symbol, period="2d", interval="1d", progress=False, timeout=30)
         if df.empty or len(df) < 2:
             return 0
         if isinstance(df.columns, pd.MultiIndex):

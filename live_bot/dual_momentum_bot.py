@@ -176,7 +176,7 @@ def get_spy_above_200ma():
     """Fails closed (treats an error as "below MA" / go to cash) rather than failing
     open — a data outage shouldn't be silently treated as "market's fine"."""
     try:
-        spy = yf.download("SPY", period="1y", interval="1d", progress=False)
+        spy = yf.download("SPY", period="1y", interval="1d", progress=False, timeout=30)
         if spy.empty or len(spy) < 200:
             print("  SPY data unavailable - treating as below 200 day moving average")
             return False
@@ -194,7 +194,7 @@ def get_spy_above_200ma():
 
 def get_momentum_score(ticker):
     try:
-        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, timeout=30)
         if df.empty or len(df) < 130:
             return None
         if isinstance(df.columns, pd.MultiIndex):

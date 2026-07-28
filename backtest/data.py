@@ -30,7 +30,7 @@ def fetch_symbol(symbol: str, start: str, end: str, interval: str = "1d",
             return cached.loc[(cached.index >= start) & (cached.index <= end)]
 
     import yfinance as yf
-    df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
+    df = yf.download(symbol, start=start, end=end, interval=interval, progress=False, timeout=30)
     if df.empty:
         raise ValueError(f"No data returned for {symbol} ({interval}, {start}..{end})")
     df = _flatten_columns(df)
