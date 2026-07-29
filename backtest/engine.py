@@ -87,6 +87,12 @@ def run_backtest(price_data: Dict[str, pd.DataFrame], spy_data: pd.DataFrame,
     for i in range(start_i, n):
         date = common_index[i]
 
+        # The Chronos calls below are the slow part (real model inference per
+        # candidate symbol per day) and can silently run for a long time with
+        # zero output otherwise, which is indistinguishable from being stuck.
+        if (i - start_i) % 20 == 0:
+            print(f"  ...{i - start_i}/{n - start_i} trading days processed ({date.date()})")
+
         if pending_entry is not None and pending_entry not in positions:
             symbol = pending_entry
             open_price = float(bars[symbol]["Open"].iloc[i])

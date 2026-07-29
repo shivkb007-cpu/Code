@@ -52,7 +52,9 @@ def main():
         spy = synthetic.make_symbol("SPY", fetch_start, args.end, seed=1)
     else:
         from . import data
+        print("Fetching historical data...")
         universe = data.fetch_universe(config.watchlist, fetch_start, args.end, args.interval)
+        print("  Fetching SPY...")
         spy = data.fetch_symbol("SPY", fetch_start, args.end, args.interval)
 
     if args.interval == "60m":
@@ -60,7 +62,10 @@ def main():
     else:
         config.time_stop_bars = 1
 
+    print("Loading signal model..." if args.use_chronos else "Loading fallback signal...")
     signal = load_signal(args.use_chronos)
+
+    print("Running backtest (this is the slow part — progress prints every 20 simulated trading days)...")
     result = run_backtest(universe, spy, config, signal)
 
     # drop the warmup-only portion so reported metrics reflect the requested window

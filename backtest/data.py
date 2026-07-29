@@ -48,6 +48,7 @@ def fetch_universe(symbols: List[str], start: str, end: str, interval: str = "1d
     silently dropping it — a strategy backtest should not quietly run on a smaller
     universe than requested."""
     out = {}
-    for symbol in symbols:
+    for i, symbol in enumerate(symbols, 1):
+        print(f"  Fetching {symbol} ({i}/{len(symbols)})...")
         out[symbol] = fetch_symbol(symbol, start, end, interval, use_cache)
     return out

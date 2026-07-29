@@ -71,6 +71,9 @@ def run_backtest(price_data: dict, spy_data: pd.DataFrame, top_n: int = 1,
             equity_dates.append(date)
             continue
 
+        if (i - MIN_LOOKBACK_BARS) % 250 == 0:
+            print(f"  ...{i - MIN_LOOKBACK_BARS}/{n - MIN_LOOKBACK_BARS} trading days processed ({date.date()})")
+
         # Daily stop-loss, independent of the weekly rebalance — a violent single-name
         # move shouldn't have to wait until the next Monday to get cut.
         for symbol in list(positions.keys()):
